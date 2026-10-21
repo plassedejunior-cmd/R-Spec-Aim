@@ -9,6 +9,8 @@ Calibrador de sensibilidade para Windows 11, seguindo a spec "Primeira Parada" (
 3. **Configurar e testar:** escolha "Só o mouse" (sugestão em DPI e polling rate) ou um jogo (sugestão também na sensibilidade do jogo e em cm/360), e informe o DPI e a sensibilidade que você usa. Eles servem só para converter o resultado. Aperte F11 para tela cheia e clique em Começar.
 4. **Resultado:** responda se dá para ajustar horizontal e vertical separados e veja a sugestão. Para testar a sugestão, mude você mesmo o DPI ou a sensibilidade, atualize os valores e rode outra rodada. Com duas rodadas ou mais, o app aponta a de melhor equilíbrio entre velocidade e precisão.
 
+**Teste rápido:** 5 blocos curtos de 10 alvos, de ×0,85 a ×1,15 da sua sensibilidade, para achar o seu ponto de equilíbrio entre velocidade e precisão sem depender de histórico. Tem dois modos: "Escala só no app", em que a velocidade da mira muda só dentro do app e a ordem é sorteada, e "100% nativo", em que o app pede um DPI diferente a cada bloco e você troca no software do mouse.
+
 **Movimento nativo:** no teste a mira anda exatamente como o cursor do Windows (counts do sensor × velocidade do ponteiro, sem aceleração, em pixels físicos). O app nunca muda a sensibilidade nem o DPI durante o teste.
 
 Cada rodada é gravada em `%APPDATA%\RSpecAim\sessions\<timestamp>\` (session.json, trials.json, raw.csv).

@@ -125,6 +125,77 @@ pub fn best_round(rounds: &[RoundScore], p: &Params) -> Option<usize> {
     })
 }
 
+/// Um bloco curto da varredura de sensibilidade.
+#[derive(Clone, Copy, Debug)]
+pub struct SweepPoint {
+    /// Escala de sensibilidade do bloco em relação ao nativo (1.0 = nativo).
+    pub scale: f64,
+    pub median_ratio: f64,
+    pub throughput: f64,
+}
+
+/// Pontuação de um bloco: throughput, com penalidade suave quando a primeira parada sai
+/// da faixa aceitável. A precisão continua sendo o filtro principal.
+pub fn sweep_score(pt: &SweepPoint) -> f64 {
+    let (lo, hi) = ACCEPT_BAND;
+    let d = if pt.median_ratio < lo { lo - pt.median_ratio } else if pt.median_ratio > hi { pt.median_ratio - hi } else { 0.0 };
+    pt.throughput * (-(d / 0.08).powi(2)).exp()
+}
+
+/// Escala de equilíbrio entre velocidade e precisão a partir da varredura.
+/// Ajusta uma parábola da pontuação contra ln(escala) por mínimos quadrados; se ela tiver
+/// máximo dentro da faixa testada, usa o vértice, senão usa o melhor bloco medido.
+pub fn sweep_optimum(points: &[SweepPoint]) -> Option<f64> {
+    let pts: Vec<(f64, f64)> = points
+        .iter()
+        .filter(|p| p.scale > 0.0 && p.throughput.is_finite() && p.median_ratio.is_finite())
+        .map(|p| (p.scale.ln(), sweep_score(p)))
+        .collect();
+    let best = pts.iter().copied().max_by(|a, b| a.1.total_cmp(&b.1))?;
+    if pts.len() < 3 {
+        return Some(best.0.exp());
+    }
+    // normais de y = a + b x + c x²
+    let mut m = [[0.0f64; 4]; 3];
+    for &(x, y) in &pts {
+        let v = [1.0, x, x * x];
+        for i in 0..3 {
+            for j in 0..3 {
+                m[i][j] += v[i] * v[j];
+            }
+            m[i][3] += v[i] * y;
+        }
+    }
+    let Some([_, b, c]) = solve3(m) else { return Some(best.0.exp()) };
+    let (xmin, xmax) = pts.iter().fold((f64::MAX, f64::MIN), |r, p| (r.0.min(p.0), r.1.max(p.0)));
+    if c < 0.0 {
+        let xv = -b / (2.0 * c);
+        if (xmin..=xmax).contains(&xv) {
+            return Some(xv.exp());
+        }
+    }
+    Some(best.0.exp())
+}
+
+fn solve3(mut m: [[f64; 4]; 3]) -> Option<[f64; 3]> {
+    for col in 0..3 {
+        let piv = (col..3).max_by(|&a, &b| m[a][col].abs().total_cmp(&m[b][col].abs()))?;
+        if m[piv][col].abs() < 1e-12 {
+            return None;
+        }
+        m.swap(col, piv);
+        for r in 0..3 {
+            if r != col {
+                let f = m[r][col] / m[col][col];
+                for k in col..4 {
+                    m[r][k] -= f * m[col][k];
+                }
+            }
+        }
+    }
+    Some([m[0][3] / m[0][0], m[1][3] / m[1][1], m[2][3] / m[2][2]])
+}
+
 /// Conselho de polling rate a partir da taxa medida e do fps do PC (fundamentos do
 /// projeto: 1000 Hz é o padrão; PC simples fica em 500-1000; acima disso só se o frame
 /// time não piorar).
@@ -245,6 +316,29 @@ mod tests {
         assert_eq!(best_round(&r, &p), Some(1));
         let fora = [RoundScore { median_ratio: 1.2, throughput: 6.0 }, RoundScore { median_ratio: 1.1, throughput: 5.0 }];
         assert_eq!(best_round(&fora, &p), Some(1));
+    }
+
+    #[test]
+    fn varredura_acha_o_pico() {
+        // throughput com pico em escala 0.92
+        let pts: Vec<SweepPoint> = [0.85, 0.92, 1.0, 1.08, 1.15]
+            .iter()
+            .map(|&k: &f64| SweepPoint { scale: k, median_ratio: 0.95, throughput: 5.0 - 40.0 * (k.ln() - 0.92f64.ln()).powi(2) })
+            .collect();
+        let o = sweep_optimum(&pts).unwrap();
+        assert!((o - 0.92).abs() < 0.005, "{o}");
+    }
+
+    #[test]
+    fn varredura_penaliza_imprecisao() {
+        // a escala mais alta é a mais rápida, mas passa muito do alvo
+        let pts = [
+            SweepPoint { scale: 0.9, median_ratio: 0.94, throughput: 4.0 },
+            SweepPoint { scale: 1.0, median_ratio: 1.0, throughput: 4.2 },
+            SweepPoint { scale: 1.1, median_ratio: 1.25, throughput: 5.0 },
+        ];
+        let o = sweep_optimum(&pts).unwrap();
+        assert!(o < 1.06, "{o}");
     }
 
     #[test]

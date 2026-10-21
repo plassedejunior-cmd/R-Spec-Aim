@@ -18,7 +18,7 @@ use games::{CUSTOM, GAMES, MOUSE_ONLY};
 use rspec_analysis::stats::{aggregate, SessionStats, Summary};
 use rspec_core::{units, RawSample};
 use rspec_input::{CaptureStats, MouseSource, SystemMouseInfo};
-use rspec_recommender::{best_round, recommend, Advice, AxisAdvice, KeepReason, Params as RecParams, RoundScore};
+use rspec_recommender::{best_round, recommend, Advice, AxisAdvice, KeepReason, Params as RecParams, RoundScore, SweepPoint};
 use serde_json::json;
 use trial::{Outcome, Phase, Run, TARGET_RADIUS};
 
@@ -43,6 +43,9 @@ enum Screen {
     Monitor,
     Setup,
     Test,
+    /// Entre blocos do teste rápido.
+    SweepBreak,
+    SweepResult,
     Results,
 }
 
@@ -92,6 +95,43 @@ impl Round {
     }
 }
 
+/// Escalas do teste rápido, em relação ao movimento nativo.
+const SWEEP_SCALES: [f64; 5] = [0.85, 0.92, 1.0, 1.08, 1.15];
+const SWEEP_TRIALS: usize = 10;
+
+/// Teste rápido: blocos curtos com sensibilidades diferentes para achar o ponto de
+/// equilíbrio entre velocidade e precisão da pessoa, sem depender de histórico.
+struct Sweep {
+    /// true: a pessoa troca o DPI entre blocos e a mira fica 100% nativa.
+    /// false: a escala é aplicada só dentro do app, em ordem embaralhada (às cegas).
+    native: bool,
+    /// Escala real de cada bloco, na ordem em que roda.
+    order: Vec<f64>,
+    idx: usize,
+    blocks: Vec<(f64, SessionStats)>,
+}
+
+impl Sweep {
+    fn new(native: bool, dpi: f64, seed: u64) -> Self {
+        let mut order: Vec<f64> = if native {
+            // DPI arredondado para passos de 10; a escala real é a do DPI que a pessoa vai usar
+            SWEEP_SCALES.iter().map(|k| ((dpi * k) / 10.0).round() * 10.0 / dpi).collect()
+        } else {
+            SWEEP_SCALES.to_vec()
+        };
+        if !native {
+            let mut rng = rspec_analysis::synthetic::XorShift::new(seed);
+            for i in (1..order.len()).rev() {
+                order.swap(i, rng.below(i + 1));
+            }
+        }
+        Self { native, order, idx: 0, blocks: Vec::new() }
+    }
+    fn scale(&self) -> f64 {
+        self.order[self.idx]
+    }
+}
+
 struct App {
     src: Option<Box<dyn MouseSource>>,
     src_err: Option<String>,
@@ -105,6 +145,7 @@ struct App {
     screen: Screen,
     cfg: Config,
     run: Option<Run>,
+    sweep: Option<Sweep>,
     rounds: Vec<Round>,
     fullscreen: bool,
 }
@@ -130,6 +171,7 @@ impl App {
             screen: Screen::Monitor,
             cfg: Config { game: 0, sens: 1.2, yaw: 0.022, dpi: 800.0, fov: GAMES[0].fov, warmup: 3, trials: 32, feedback: false, split: None },
             run: None,
+            sweep: None,
             rounds: Vec::new(),
             fullscreen: false,
         }
@@ -175,8 +217,16 @@ impl App {
         let r = ctx.screen_rect();
         let arena = (r.width() as f64, r.height() as f64);
         let seed = (rspec_core::now() * 1e6) as u64 ^ 0x5eed;
-        let ppc = self.ppc(ctx.pixels_per_point() as f64);
-        self.run = Some(Run::new(arena, ppc, self.cfg.warmup, self.cfg.trials, self.cfg.feedback, seed));
+        let (ppc, warmup, trials) = match &self.sweep {
+            // modo escala: só a mira do app muda; modo nativo: a pessoa já trocou o DPI
+            Some(sw) => {
+                let k = if sw.native { 1.0 } else { sw.scale() };
+                let p = self.ppc(ctx.pixels_per_point() as f64);
+                ((p.0 * k, p.1 * k), 1, SWEEP_TRIALS)
+            }
+            None => (self.ppc(ctx.pixels_per_point() as f64), self.cfg.warmup, self.cfg.trials),
+        };
+        self.run = Some(Run::new(arena, ppc, warmup, trials, self.cfg.feedback, seed));
         self.screen = Screen::Test;
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Confined));
@@ -187,12 +237,19 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
         let Some(run) = self.run.take() else { return };
         if !complete {
+            self.sweep = None;
             self.screen = Screen::Setup;
             return;
         }
         let metrics: Vec<_> = run.records.iter().filter_map(|r| r.metrics().cloned()).collect();
         let stats = aggregate(&metrics, 0xC0FFEE);
         let saved = self.save(&run, &stats).map(|p| p.display().to_string()).ok();
+        if let Some(sw) = self.sweep.as_mut() {
+            sw.blocks.push((sw.scale(), stats));
+            sw.idx += 1;
+            self.screen = if sw.idx < sw.order.len() { Screen::SweepBreak } else { Screen::SweepResult };
+            return;
+        }
         self.rounds.push(Round { dpi: self.cfg.dpi, sens: self.cfg.sens, stats, saved });
         self.screen = Screen::Results;
     }
@@ -218,6 +275,7 @@ impl App {
             "vsync": false,
             "system_mouse": self.sys.map(|s| json!({"enhance_precision": s.enhance_precision, "speed": s.speed})),
             "absolute_events": self.cap.absolute.load(Ordering::Relaxed),
+            "sweep": self.sweep.as_ref().map(|sw| json!({"native": sw.native, "scale": sw.scale(), "block": sw.idx + 1, "blocks": sw.order.len()})),
             "stats": {"all": summ(&stats.all), "x": summ(&stats.x), "y": summ(&stats.y), "n_valid": stats.n_valid, "speed_accuracy": sa},
         });
         let trials: Vec<_> = run
@@ -278,6 +336,8 @@ impl eframe::App for App {
                 Screen::Monitor => self.monitor_ui(ui),
                 Screen::Setup => self.setup_ui(ui, ctx),
                 Screen::Results => self.results_ui(ui),
+                Screen::SweepBreak => self.sweep_break_ui(ui, ctx),
+                Screen::SweepResult => self.sweep_result_ui(ui),
                 Screen::Test => {}
             });
         });
@@ -387,9 +447,30 @@ impl App {
         ui.label("Use tela cheia (F11) para a sensação ficar igual à do jogo.");
         ui.add_space(8.0);
         let ok = self.src.is_some();
-        if ui.add_enabled(ok, egui::Button::new(egui::RichText::new("Começar").size(20.0))).clicked() {
-            self.start_round(ctx);
-        }
+        ui.horizontal(|ui| {
+            if ui.add_enabled(ok, egui::Button::new(egui::RichText::new("Teste completo").size(20.0))).clicked() {
+                self.sweep = None;
+                self.start_round(ctx);
+            }
+            ui.label(egui::RichText::new(format!("{} alvos, sugestão por eixo", self.cfg.trials)).color(MUTED));
+        });
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new("Teste rápido: acha a sensibilidade com melhor equilíbrio entre velocidade e precisão").strong());
+        ui.label(
+            egui::RichText::new(format!("{} blocos curtos de {SWEEP_TRIALS} alvos, de ×{:.2} a ×{:.2} da sua sensibilidade.", SWEEP_SCALES.len(), SWEEP_SCALES[0], SWEEP_SCALES[SWEEP_SCALES.len() - 1]))
+                .color(MUTED),
+        );
+        ui.horizontal(|ui| {
+            let seed = (rspec_core::now() * 1e6) as u64;
+            if ui.add_enabled(ok, egui::Button::new("Escala só no app (às cegas)")).clicked() {
+                self.sweep = Some(Sweep::new(false, self.cfg.dpi, seed));
+                self.screen = Screen::SweepBreak;
+            }
+            if ui.add_enabled(ok, egui::Button::new("100% nativo (eu troco o DPI)")).clicked() {
+                self.sweep = Some(Sweep::new(true, self.cfg.dpi, seed));
+                self.screen = Screen::SweepBreak;
+            }
+        });
     }
 
     fn test_screen(&mut self, ctx: &egui::Context, now: f64) {
@@ -585,6 +666,101 @@ impl App {
                 );
                 ui.label(egui::RichText::new("Só concorrem rodadas em que a primeira parada ficou entre 0,85 e 1,08; entre elas vence a de maior throughput.").color(MUTED).small());
             }
+        }
+    }
+}
+
+impl App {
+    fn sweep_break_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let Some(sw) = self.sweep.as_ref() else {
+            self.screen = Screen::Setup;
+            return;
+        };
+        ui.heading(format!("Teste rápido · bloco {} de {}", sw.idx + 1, sw.order.len()));
+        ui.add_space(8.0);
+        if sw.native {
+            let dpi = self.cfg.dpi * sw.scale();
+            ui.label(egui::RichText::new(format!("Mude o DPI do mouse para {dpi:.0} no software do mouse e clique em Continuar.")).size(20.0).color(ACCENT));
+            ui.label(egui::RichText::new(format!("No fim, volte para {:.0} se não for adotar a sugestão.", self.cfg.dpi)).color(MUTED));
+        } else {
+            ui.label("A velocidade da mira muda a cada bloco, em ordem sorteada. Seu mouse e seu jogo não mudam.");
+        }
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui.button(egui::RichText::new("Continuar").size(20.0)).clicked() {
+                self.start_round(ctx);
+            }
+            if ui.button("Cancelar").clicked() {
+                self.sweep = None;
+                self.screen = Screen::Setup;
+            }
+        });
+    }
+
+    fn sweep_result_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(sw) = self.sweep.as_ref() else { return };
+        let mut blocks = sw.blocks.clone();
+        blocks.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let pts: Vec<SweepPoint> = blocks
+            .iter()
+            .map(|(k, st)| SweepPoint {
+                scale: *k,
+                median_ratio: if st.all.n > 0 { st.all.median } else { f64::NAN },
+                throughput: st.speed_accuracy.map_or(f64::NAN, |s| s.throughput),
+            })
+            .collect();
+        ui.heading("Teste rápido: resultado");
+        ui.add_space(6.0);
+        egui::Grid::new("sweep").num_columns(6).spacing([24.0, 4.0]).show(ui, |ui| {
+            for h in ["escala", if self.cfg.mouse_only() { "DPI" } else { "sensibilidade" }, "primeira parada", "tempo até acertar", "throughput", "pontuação"] {
+                ui.label(egui::RichText::new(h).color(MUTED));
+            }
+            ui.end_row();
+            for ((k, st), p) in blocks.iter().zip(&pts) {
+                ui.label(format!("×{k:.2}"));
+                ui.label(if self.cfg.mouse_only() { format!("{:.0}", self.cfg.dpi * k) } else { format!("{:.3}", self.cfg.sens * k) });
+                ui.label(if st.all.n > 0 { format!("{:.3}", st.all.median) } else { "–".into() });
+                ui.label(st.speed_accuracy.map_or("–".into(), |s| format!("{:.0} ms", s.mt_median * 1000.0)));
+                ui.label(st.speed_accuracy.map_or("–".into(), |s| format!("{:.2}", s.throughput)));
+                ui.label(format!("{:.2}", rspec_recommender::sweep_score(p)));
+                ui.end_row();
+            }
+        });
+        ui.add_space(10.0);
+        match rspec_recommender::sweep_optimum(&pts) {
+            Some(k) => {
+                let txt = if self.cfg.mouse_only() {
+                    format!("Seu ponto de equilíbrio: ×{k:.3} → DPI {:.0} (hoje {:.0})", rspec_recommender::new_dpi(self.cfg.dpi, k, 1.0), self.cfg.dpi)
+                } else {
+                    format!(
+                        "Seu ponto de equilíbrio: ×{k:.3} → sensibilidade {:.3} no {} ({:.1} cm/360), ou DPI {:.0}",
+                        self.cfg.sens * k,
+                        GAMES[self.cfg.game].name,
+                        units::cm_per_360(self.cfg.deg_per_count() * k, self.cfg.dpi),
+                        rspec_recommender::new_dpi(self.cfg.dpi, k, 1.0)
+                    )
+                };
+                ui.label(egui::RichText::new(txt).size(20.0).color(GOOD));
+                if (k - 1.0).abs() < 0.03 {
+                    ui.label("Fica a menos de 3% do que você já usa: pode manter.");
+                }
+            }
+            None => {
+                ui.colored_label(COL_Y, "Poucos alvos válidos para achar o ponto de equilíbrio. Rode de novo.");
+            }
+        }
+        ui.label(
+            egui::RichText::new("Pontuação = throughput, com penalidade quando a primeira parada sai de 0,85 a 1,08. O ponto de equilíbrio vem de uma curva ajustada aos blocos.")
+                .color(MUTED)
+                .small(),
+        );
+        if sw.native {
+            ui.colored_label(ACCENT, format!("Lembre de voltar o DPI para {:.0} se não for adotar a sugestão.", self.cfg.dpi));
+        }
+        ui.add_space(8.0);
+        if ui.button("Voltar").clicked() {
+            self.sweep = None;
+            self.screen = Screen::Setup;
         }
     }
 }

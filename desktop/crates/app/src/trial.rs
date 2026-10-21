@@ -86,16 +86,11 @@ pub struct Run {
 impl Run {
     pub fn new(arena: (f64, f64), ppc: (f64, f64), warmup: usize, valid_goal: usize, feedback: bool, seed: u64) -> Self {
         let mut rng = XorShift::new(seed);
-        // 8 setores x 4 distâncias, balanceado; garante >= 8 horizontais e >= 8 verticais
-        let mut main: Vec<Plan> = Vec::new();
-        while main.len() < valid_goal {
-            for s in 0..8 {
-                for d in DISTANCES {
-                    main.push(Plan { angle_deg: s as f64 * 45.0, distance: d, warmup: false });
-                }
-            }
-        }
-        main.truncate(valid_goal.max(16));
+        // 8 setores x 4 distâncias, balanceado para qualquer quantidade: percorre os setores
+        // primeiro e depois as faixas de distância (32 trials = 8 horizontais e 8 verticais)
+        let mut main: Vec<Plan> = (0..valid_goal)
+            .map(|k| Plan { angle_deg: (k % 8) as f64 * 45.0, distance: DISTANCES[(k / 8 + k % 4) % 4], warmup: false })
+            .collect();
         shuffle(&mut main, &mut rng);
         let mut queue: Vec<Plan> = (0..warmup)
             .map(|_| Plan { angle_deg: rng.below(8) as f64 * 45.0, distance: DISTANCES[rng.below(4)], warmup: true })
