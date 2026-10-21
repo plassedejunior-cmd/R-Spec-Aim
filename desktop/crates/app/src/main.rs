@@ -73,7 +73,9 @@ impl Config {
 }
 
 struct Round {
-    gain: (f64, f64),
+    /// Configuração que a pessoa usava nesta rodada (o app não muda nada durante o teste).
+    dpi: f64,
+    sens: f64,
     stats: SessionStats,
     saved: Option<String>,
 }
@@ -81,7 +83,6 @@ struct Round {
 impl Round {
     fn score(&self) -> RoundScore {
         RoundScore {
-            gain: self.gain.0,
             median_ratio: if self.stats.all.n > 0 { self.stats.all.median } else { f64::NAN },
             throughput: self.stats.speed_accuracy.map_or(f64::NAN, |s| s.throughput),
         }
@@ -100,7 +101,6 @@ struct App {
     last_frame: f64,
     screen: Screen,
     cfg: Config,
-    gain: (f64, f64),
     run: Option<Run>,
     rounds: Vec<Round>,
     fullscreen: bool,
@@ -126,7 +126,6 @@ impl App {
             last_frame: rspec_core::now(),
             screen: Screen::Monitor,
             cfg: Config { game: 0, sens: 1.2, yaw: 0.022, dpi: 800.0, fov: GAMES[0].fov, warmup: 3, trials: 32, feedback: false, split: None },
-            gain: (1.0, 1.0),
             run: None,
             rounds: Vec::new(),
             fullscreen: false,
@@ -159,17 +158,22 @@ impl App {
         1000.0 / avg.max(0.01)
     }
 
-    /// Pixels por count: mesma escala angular do jogo, com a arena ocupando o FOV horizontal.
-    fn ppc(&self, width_px: f64) -> (f64, f64) {
-        let base = self.cfg.deg_per_count() * width_px / self.cfg.fov;
-        (base * self.gain.0, base * self.gain.1)
+    /// Movimento nativo: a mira anda exatamente como o cursor do Windows (counts x
+    /// velocidade do ponteiro, sem aceleração), em pixels físicos. O teste nunca muda a
+    /// sensibilidade da pessoa; a sugestão só aparece no resultado.
+    /// Retorna pontos do egui por count (pixels físicos / pixels_per_point).
+    fn ppc(&self, pixels_per_point: f64) -> (f64, f64) {
+        let mult = self.sys.map_or(1.0, |s| rspec_input::pointer_multiplier(s.speed));
+        let v = mult / pixels_per_point;
+        (v, v)
     }
 
     fn start_round(&mut self, ctx: &egui::Context) {
         let r = ctx.screen_rect();
         let arena = (r.width() as f64, r.height() as f64);
         let seed = (rspec_core::now() * 1e6) as u64 ^ 0x5eed;
-        self.run = Some(Run::new(arena, self.ppc(arena.0), self.cfg.warmup, self.cfg.trials, self.cfg.feedback, seed));
+        let ppc = self.ppc(ctx.pixels_per_point() as f64);
+        self.run = Some(Run::new(arena, ppc, self.cfg.warmup, self.cfg.trials, self.cfg.feedback, seed));
         self.screen = Screen::Test;
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Confined));
@@ -186,7 +190,7 @@ impl App {
         let metrics: Vec<_> = run.records.iter().filter_map(|r| r.metrics().cloned()).collect();
         let stats = aggregate(&metrics, 0xC0FFEE);
         let saved = self.save(&run, &stats).map(|p| p.display().to_string()).ok();
-        self.rounds.push(Round { gain: self.gain, stats, saved });
+        self.rounds.push(Round { dpi: self.cfg.dpi, sens: self.cfg.sens, stats, saved });
         self.screen = Screen::Results;
     }
 
@@ -201,7 +205,7 @@ impl App {
             "mode": "2d",
             "config": {
                 "game": GAMES[self.cfg.game].name, "sens": self.cfg.sens, "yaw": self.cfg.yaw(),
-                "dpi_nominal": self.cfg.dpi, "fov": self.cfg.fov, "gain": [self.gain.0, self.gain.1],
+                "dpi_nominal": self.cfg.dpi, "fov": self.cfg.fov, "mapping": "native-windows-pointer",
                 "px_per_count": [run.ppc.0, run.ppc.1], "arena_px": [run.arena.0, run.arena.1],
                 "feedback": run.feedback,
             },
@@ -270,7 +274,7 @@ impl eframe::App for App {
             egui::ScrollArea::vertical().show(ui, |ui| match self.screen {
                 Screen::Monitor => self.monitor_ui(ui),
                 Screen::Setup => self.setup_ui(ui, ctx),
-                Screen::Results => self.results_ui(ui, ctx),
+                Screen::Results => self.results_ui(ui),
                 Screen::Test => {}
             });
         });
@@ -349,9 +353,6 @@ impl App {
             ui.label("DPI do mouse");
             ui.add(egui::DragValue::new(&mut c.dpi).speed(10.0).range(100.0..=32000.0));
             ui.end_row();
-            ui.label("FOV horizontal");
-            ui.add(egui::DragValue::new(&mut c.fov).speed(0.5).range(60.0..=150.0).suffix("°"));
-            ui.end_row();
             ui.label("Trials válidos");
             ui.add(egui::DragValue::new(&mut c.trials).range(16..=96));
             ui.end_row();
@@ -362,11 +363,12 @@ impl App {
         let cm = units::cm_per_360(c.deg_per_count(), c.dpi);
         ui.add_space(6.0);
         ui.label(format!("Sensibilidade atual: {cm:.1} cm/360 (com {:.0} DPI nominal)", c.dpi));
-        if self.gain != (1.0, 1.0) {
-            ui.label(format!("Ganho de teste aplicado: X ×{:.3} · Y ×{:.3}", self.gain.0, self.gain.1));
-            if ui.button("Zerar ganho").clicked() {
-                self.gain = (1.0, 1.0);
-            }
+        ui.label(
+            egui::RichText::new("No teste a mira anda igual ao seu cursor do Windows, com o DPI e a velocidade que você já usa. O app não muda nada no seu mouse nem no jogo.")
+                .color(MUTED),
+        );
+        if self.sys.is_some_and(|s| s.enhance_precision) {
+            ui.colored_label(COL_Y, "\"Aumentar precisão do ponteiro\" está ligado no Windows. O teste ignora essa aceleração, como os jogos com raw input.");
         }
         ui.add_space(12.0);
         ui.label("Mire no alvo pequeno e clique nele o mais rápido que conseguir sem errar. Fique parado até o próximo alvo aparecer. Esc cancela.");
@@ -430,7 +432,7 @@ impl App {
         }
     }
 
-    fn results_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn results_ui(&mut self, ui: &mut egui::Ui) {
         let Some(round) = self.rounds.last() else { return };
         let st = &round.stats;
         ui.heading("Onde a mira para no primeiro movimento");
@@ -482,12 +484,12 @@ impl App {
         let dpc = self.cfg.deg_per_count();
         let (fx, fy) = match &advice {
             Advice::Split { x, y } => {
-                axis_line(ui, "Horizontal", COL_X, x, &self.cfg, self.gain.0);
-                axis_line(ui, "Vertical", COL_Y, y, &self.cfg, self.gain.1);
+                axis_line(ui, "Horizontal", COL_X, x, &self.cfg);
+                axis_line(ui, "Vertical", COL_Y, y, &self.cfg);
                 (x.factor, y.factor)
             }
             Advice::Single { all, imbalance } => {
-                axis_line(ui, "Sensibilidade", ACCENT, all, &self.cfg, self.gain.0);
+                axis_line(ui, "Sensibilidade", ACCENT, all, &self.cfg);
                 if let Some(d) = imbalance {
                     let which = if *d > 0.0 { "horizontal passa mais" } else { "vertical passa mais" };
                     ui.colored_label(COL_Y, format!("Eixos desequilibrados ({which}, diferença {:.2}). Se o jogo tiver, ajuste em: {}.", d.abs(), GAMES[self.cfg.game].vertical));
@@ -495,19 +497,19 @@ impl App {
                 (all.factor, all.factor)
             }
         };
-        let total = (self.gain.0 * fx, self.gain.1 * fy);
+        let total = (fx, fy);
         ui.add_space(6.0);
         ui.label(format!(
             "cm/360: {:.1} → {:.1}  (DPI nominal; calibrar o DPI real vem na próxima fase)",
-            units::cm_per_360(dpc * self.gain.0, self.cfg.dpi),
+            units::cm_per_360(dpc, self.cfg.dpi),
             units::cm_per_360(dpc * total.0, self.cfg.dpi)
         ));
         ui.label(format!("Alternativa pelo DPI do mouse: {:.0} → {:.0}", self.cfg.dpi, rspec_recommender::new_dpi(self.cfg.dpi, total.0, 1.0)));
+        ui.label(egui::RichText::new("Para testar a sugestão, mude você mesmo o DPI ou a sensibilidade, atualize os valores na tela de configuração e rode de novo.").color(MUTED));
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            if ui.button("Testar com a sugestão").clicked() {
-                self.gain = total;
-                self.start_round(ctx);
+            if ui.button("Nova rodada").clicked() {
+                self.screen = Screen::Setup;
             }
             if ui.button("Mudar resposta dos eixos").clicked() {
                 self.cfg.split = None;
@@ -520,14 +522,14 @@ impl App {
             let scores: Vec<RoundScore> = self.rounds.iter().map(Round::score).collect();
             let best = best_round(&scores, &rp);
             egui::Grid::new("cmp").num_columns(7).spacing([24.0, 4.0]).show(ui, |ui| {
-                for h in ["rodada", "ganho X · Y", "geral", "horizontal", "vertical", "tempo até acertar", "throughput"] {
+                for h in ["rodada", "DPI · sens", "geral", "horizontal", "vertical", "tempo até acertar", "throughput"] {
                     ui.label(egui::RichText::new(h).color(MUTED));
                 }
                 ui.end_row();
                 for (i, r) in self.rounds.iter().enumerate() {
                     let label = format!("{}{}", i + 1, if best == Some(i) { " ★" } else { "" });
                     ui.colored_label(if best == Some(i) { GOOD } else { Color32::WHITE }, label);
-                    ui.label(format!("×{:.3} · ×{:.3}", r.gain.0, r.gain.1));
+                    ui.label(format!("{:.0} · {:.3}", r.dpi, r.sens));
                     for s in [&r.stats.all, &r.stats.x, &r.stats.y] {
                         ui.label(if s.n > 0 { format!("{:.3}", s.median) } else { "–".into() });
                     }
@@ -538,14 +540,14 @@ impl App {
                 }
             });
             if let Some(b) = best {
-                let g = self.rounds[b].gain;
+                let r = &self.rounds[b];
                 ui.add_space(6.0);
                 ui.label(
                     egui::RichText::new(format!(
-                        "Melhor equilíbrio entre velocidade e precisão: rodada {} → sensibilidade {:.3}{} no {}",
+                        "Melhor equilíbrio entre velocidade e precisão: rodada {} ({:.0} DPI, sensibilidade {:.3} no {})",
                         b + 1,
-                        self.cfg.sens * g.0,
-                        if (g.0 - g.1).abs() > 1e-6 { format!(" (vertical ×{:.3})", g.1 / g.0) } else { String::new() },
+                        r.dpi,
+                        r.sens,
                         GAMES[self.cfg.game].name
                     ))
                     .size(18.0)
@@ -557,13 +559,13 @@ impl App {
     }
 }
 
-fn axis_line(ui: &mut egui::Ui, name: &str, col: Color32, a: &AxisAdvice, cfg: &Config, gain: f64) {
+fn axis_line(ui: &mut egui::Ui, name: &str, col: Color32, a: &AxisAdvice, cfg: &Config) {
     let txt = match a.keep {
         Some(KeepReason::NoData) => "sem dados suficientes".to_string(),
         Some(KeepReason::CiInBand) => "manter (já está na faixa boa)".to_string(),
         Some(KeepReason::SmallChange) => format!("manter (mudança de {:+.1}% é pequena demais)", (a.raw - 1.0) * 100.0),
         None => {
-            let f = gain * a.factor;
+            let f = a.factor;
             format!("×{:.3} ({:+.0}%) → sensibilidade {:.3} no {}", a.factor, (a.factor - 1.0) * 100.0, cfg.sens * f, GAMES[cfg.game].name)
         }
     };

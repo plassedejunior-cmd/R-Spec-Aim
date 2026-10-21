@@ -6,8 +6,10 @@ Calibrador de sensibilidade para Windows 11, seguindo a spec "Primeira Parada" (
 
 1. Rode `R-Spec-Aim.exe` (pasta `../build`). O Windows pode avisar que o app não é assinado: "Mais informações" → "Executar assim mesmo".
 2. **Captura:** mova o mouse em círculos rápidos e confira o polling rate medido.
-3. **Configurar e testar:** escolha o jogo, sensibilidade, DPI e FOV. Aperte F11 para tela cheia e clique em Começar.
-4. **Resultado:** responda se dá para ajustar horizontal e vertical separados, veja a sugestão e use "Testar com a sugestão" para rodar de novo. Com duas rodadas ou mais, o app aponta a de melhor equilíbrio entre velocidade e precisão.
+3. **Configurar e testar:** informe o jogo, a sensibilidade e o DPI que você usa (servem só para converter o resultado). Aperte F11 para tela cheia e clique em Começar.
+4. **Resultado:** responda se dá para ajustar horizontal e vertical separados e veja a sugestão. Para testar a sugestão, mude você mesmo o DPI ou a sensibilidade, atualize os valores e rode outra rodada. Com duas rodadas ou mais, o app aponta a de melhor equilíbrio entre velocidade e precisão.
+
+**Movimento nativo:** no teste a mira anda exatamente como o cursor do Windows (counts do sensor × velocidade do ponteiro, sem aceleração, em pixels físicos). O app nunca muda a sensibilidade nem o DPI durante o teste.
 
 Cada rodada é gravada em `%APPDATA%\RSpecAim\sessions\<timestamp>\` (session.json, trials.json, raw.csv).
 

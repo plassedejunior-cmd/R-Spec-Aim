@@ -101,8 +101,6 @@ pub fn recommend(stats: &SessionStats, split: bool, p: &Params) -> Advice {
 /// Uma rodada já jogada, para escolher entre sensibilidades testadas.
 #[derive(Clone, Copy, Debug)]
 pub struct RoundScore {
-    /// Ganho aplicado na rodada (1.0 = sensibilidade original).
-    pub gain: f64,
     pub median_ratio: f64,
     /// Throughput (bits/s), veja `rspec_analysis::stats::SpeedAccuracy`.
     pub throughput: f64,
@@ -223,12 +221,12 @@ mod tests {
     fn melhor_rodada_equilibra_velocidade() {
         let p = Params::default();
         let r = [
-            RoundScore { gain: 1.0, median_ratio: 1.12, throughput: 6.0 }, // rápido, mas passa do alvo
-            RoundScore { gain: 0.92, median_ratio: 0.97, throughput: 4.8 },
-            RoundScore { gain: 0.85, median_ratio: 0.93, throughput: 4.1 }, // preciso, mas lento
+            RoundScore { median_ratio: 1.12, throughput: 6.0 }, // rápido, mas passa do alvo
+            RoundScore { median_ratio: 0.97, throughput: 4.8 },
+            RoundScore { median_ratio: 0.93, throughput: 4.1 }, // preciso, mas lento
         ];
         assert_eq!(best_round(&r, &p), Some(1));
-        let fora = [RoundScore { gain: 1.0, median_ratio: 1.2, throughput: 6.0 }, RoundScore { gain: 0.9, median_ratio: 1.1, throughput: 5.0 }];
+        let fora = [RoundScore { median_ratio: 1.2, throughput: 6.0 }, RoundScore { median_ratio: 1.1, throughput: 5.0 }];
         assert_eq!(best_round(&fora, &p), Some(1));
     }
 

@@ -30,6 +30,16 @@ pub struct SystemMouseInfo {
     pub speed: u32,
 }
 
+/// Pixels por count do cursor do Windows para cada posição do controle de velocidade
+/// (1 a 20), sem "aumentar precisão do ponteiro". Na posição 10 é 1:1.
+pub fn pointer_multiplier(speed: u32) -> f64 {
+    const TABLE: [f64; 20] = [
+        1.0 / 32.0, 1.0 / 16.0, 1.0 / 8.0, 2.0 / 8.0, 3.0 / 8.0, 4.0 / 8.0, 5.0 / 8.0, 6.0 / 8.0, 7.0 / 8.0, 1.0,
+        1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.25, 3.5,
+    ];
+    TABLE[(speed.clamp(1, 20) - 1) as usize]
+}
+
 pub trait MouseSource {
     /// Move para `out` todas as amostras capturadas desde a última chamada.
     fn drain(&mut self, out: &mut Vec<RawSample>);
