@@ -1,0 +1,9 @@
+[package]
+name = "rspec-recommender"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rspec-core = { path = "../core" }
+rspec-analysis = { path = "../analysis" }
