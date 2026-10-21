@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke};
-use games::{CUSTOM, GAMES};
+use games::{CUSTOM, GAMES, MOUSE_ONLY};
 use rspec_analysis::stats::{aggregate, SessionStats, Summary};
 use rspec_core::{units, RawSample};
 use rspec_input::{CaptureStats, MouseSource, SystemMouseInfo};
@@ -69,6 +69,9 @@ impl Config {
     }
     fn deg_per_count(&self) -> f64 {
         self.sens * self.yaw()
+    }
+    fn mouse_only(&self) -> bool {
+        self.game == MOUSE_ONLY
     }
 }
 
@@ -320,6 +323,9 @@ impl App {
                 ui.end_row();
             }
         });
+        if let Some(hz) = self.polling {
+            ui.label(rspec_recommender::polling_advice(hz, self.fps()));
+        }
         if self.cap.absolute_seen() {
             ui.colored_label(COL_Y, "Recebi eventos absolutos (tablet, área de trabalho remota ou VM). Eles foram descartados; use um mouse comum direto no PC.");
         }
@@ -347,9 +353,11 @@ impl App {
                 ui.add(egui::DragValue::new(&mut c.yaw).speed(0.0001).range(0.0001..=1.0).max_decimals(5));
                 ui.end_row();
             }
-            ui.label("Sensibilidade no jogo");
-            ui.add(egui::DragValue::new(&mut c.sens).speed(0.01).range(0.01..=100.0).max_decimals(3));
-            ui.end_row();
+            if c.game != MOUSE_ONLY {
+                ui.label("Sensibilidade no jogo");
+                ui.add(egui::DragValue::new(&mut c.sens).speed(0.01).range(0.01..=100.0).max_decimals(3));
+                ui.end_row();
+            }
             ui.label("DPI do mouse");
             ui.add(egui::DragValue::new(&mut c.dpi).speed(10.0).range(100.0..=32000.0));
             ui.end_row();
@@ -360,9 +368,13 @@ impl App {
             ui.checkbox(&mut c.feedback, "mostrar (pode mudar o jeito que você mira)");
             ui.end_row();
         });
-        let cm = units::cm_per_360(c.deg_per_count(), c.dpi);
         ui.add_space(6.0);
-        ui.label(format!("Sensibilidade atual: {cm:.1} cm/360 (com {:.0} DPI nominal)", c.dpi));
+        if c.mouse_only() {
+            ui.label("Calibra só o mouse: a sugestão sai em DPI (e DPI X/Y, se o software do mouse deixar) e polling rate.");
+        } else {
+            let cm = units::cm_per_360(c.deg_per_count(), c.dpi);
+            ui.label(format!("Sensibilidade atual: {cm:.1} cm/360 (com {:.0} DPI nominal)", c.dpi));
+        }
         ui.label(
             egui::RichText::new("No teste a mira anda igual ao seu cursor do Windows, com o DPI e a velocidade que você já usa. O app não muda nada no seu mouse nem no jogo.")
                 .color(MUTED),
@@ -468,7 +480,12 @@ impl App {
         ui.add_space(14.0);
 
         let Some(split) = self.cfg.split else {
-            ui.label(egui::RichText::new("Seu mouse ou jogo permite ajustar horizontal e vertical separadamente?").size(18.0));
+            let q = if self.cfg.mouse_only() {
+                "O software do seu mouse permite DPI horizontal e vertical separados?"
+            } else {
+                "Seu mouse ou jogo permite ajustar horizontal e vertical separadamente?"
+            };
+            ui.label(egui::RichText::new(q).size(18.0));
             ui.horizontal(|ui| {
                 if ui.button("Sim").clicked() {
                     self.cfg.split = Some(true);
@@ -492,19 +509,33 @@ impl App {
                 axis_line(ui, "Sensibilidade", ACCENT, all, &self.cfg);
                 if let Some(d) = imbalance {
                     let which = if *d > 0.0 { "horizontal passa mais" } else { "vertical passa mais" };
-                    ui.colored_label(COL_Y, format!("Eixos desequilibrados ({which}, diferença {:.2}). Se o jogo tiver, ajuste em: {}.", d.abs(), GAMES[self.cfg.game].vertical));
+                    ui.colored_label(COL_Y, format!("Eixos desequilibrados ({which}, diferença {:.2}). Onde dá para ajustar, se existir: {}.", d.abs(), GAMES[self.cfg.game].vertical));
                 }
                 (all.factor, all.factor)
             }
         };
         let total = (fx, fy);
         ui.add_space(6.0);
-        ui.label(format!(
-            "cm/360: {:.1} → {:.1}  (DPI nominal; calibrar o DPI real vem na próxima fase)",
-            units::cm_per_360(dpc, self.cfg.dpi),
-            units::cm_per_360(dpc * total.0, self.cfg.dpi)
-        ));
-        ui.label(format!("Alternativa pelo DPI do mouse: {:.0} → {:.0}", self.cfg.dpi, rspec_recommender::new_dpi(self.cfg.dpi, total.0, 1.0)));
+        if self.cfg.mouse_only() {
+            if split && (total.0 - total.1).abs() > 1e-9 {
+                ui.label(format!(
+                    "DPI: {:.0} → X {:.0} · Y {:.0}",
+                    self.cfg.dpi,
+                    rspec_recommender::new_dpi(self.cfg.dpi, total.0, 1.0),
+                    rspec_recommender::new_dpi(self.cfg.dpi, total.1, 1.0)
+                ));
+            }
+        } else {
+            ui.label(format!(
+                "cm/360: {:.1} → {:.1}  (DPI nominal; calibrar o DPI real vem na próxima fase)",
+                units::cm_per_360(dpc, self.cfg.dpi),
+                units::cm_per_360(dpc * total.0, self.cfg.dpi)
+            ));
+            ui.label(format!("Alternativa pelo DPI do mouse: {:.0} → {:.0}", self.cfg.dpi, rspec_recommender::new_dpi(self.cfg.dpi, total.0, 1.0)));
+        }
+        if let Some(hz) = self.polling {
+            ui.label(format!("Polling rate: {}", rspec_recommender::polling_advice(hz, self.fps())));
+        }
         ui.label(egui::RichText::new("Para testar a sugestão, mude você mesmo o DPI ou a sensibilidade, atualize os valores na tela de configuração e rode de novo.").color(MUTED));
         ui.add_space(10.0);
         ui.horizontal(|ui| {
@@ -544,11 +575,10 @@ impl App {
                 ui.add_space(6.0);
                 ui.label(
                     egui::RichText::new(format!(
-                        "Melhor equilíbrio entre velocidade e precisão: rodada {} ({:.0} DPI, sensibilidade {:.3} no {})",
+                        "Melhor equilíbrio entre velocidade e precisão: rodada {} ({:.0} DPI{})",
                         b + 1,
                         r.dpi,
-                        r.sens,
-                        GAMES[self.cfg.game].name
+                        if self.cfg.mouse_only() { String::new() } else { format!(", sensibilidade {:.3} no {}", r.sens, GAMES[self.cfg.game].name) }
                     ))
                     .size(18.0)
                     .color(GOOD),
@@ -566,7 +596,11 @@ fn axis_line(ui: &mut egui::Ui, name: &str, col: Color32, a: &AxisAdvice, cfg: &
         Some(KeepReason::SmallChange) => format!("manter (mudança de {:+.1}% é pequena demais)", (a.raw - 1.0) * 100.0),
         None => {
             let f = a.factor;
-            format!("×{:.3} ({:+.0}%) → sensibilidade {:.3} no {}", a.factor, (a.factor - 1.0) * 100.0, cfg.sens * f, GAMES[cfg.game].name)
+            if cfg.mouse_only() {
+                format!("×{:.3} ({:+.0}%) → DPI {:.0}", f, (f - 1.0) * 100.0, rspec_recommender::new_dpi(cfg.dpi, f, 1.0))
+            } else {
+                format!("×{:.3} ({:+.0}%) → sensibilidade {:.3} no {}", f, (f - 1.0) * 100.0, cfg.sens * f, GAMES[cfg.game].name)
+            }
         }
     };
     ui.horizontal(|ui| {

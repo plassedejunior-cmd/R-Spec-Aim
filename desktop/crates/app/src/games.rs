@@ -10,6 +10,7 @@ pub struct Game {
 }
 
 pub const GAMES: &[Game] = &[
+    Game { name: "Só o mouse (sem jogo)", yaw: 0.0, fov: 0.0, vertical: "DPI X/Y separado no software do mouse" },
     Game { name: "Counter-Strike 2", yaw: 0.022, fov: 106.26, vertical: "m_pitch (padrão 0,022)" },
     Game { name: "Valorant", yaw: 0.07, fov: 103.0, vertical: "Multiplicador de sensibilidade vertical" },
     Game { name: "Apex Legends", yaw: 0.022, fov: 110.0, vertical: "proporção vertical no settings.cfg" },
@@ -17,4 +18,6 @@ pub const GAMES: &[Game] = &[
     Game { name: "Outro (yaw manual)", yaw: 0.022, fov: 103.0, vertical: "ajuste vertical do jogo, se existir" },
 ];
 
-pub const CUSTOM: usize = 4;
+/// Calibra só o mouse: a sugestão sai em DPI e polling rate, sem converter para jogo.
+pub const MOUSE_ONLY: usize = 0;
+pub const CUSTOM: usize = 5;

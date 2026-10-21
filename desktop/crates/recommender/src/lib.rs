@@ -125,6 +125,23 @@ pub fn best_round(rounds: &[RoundScore], p: &Params) -> Option<usize> {
     })
 }
 
+/// Conselho de polling rate a partir da taxa medida e do fps do PC (fundamentos do
+/// projeto: 1000 Hz é o padrão; PC simples fica em 500-1000; acima disso só se o frame
+/// time não piorar).
+pub fn polling_advice(measured_hz: f64, fps: f64) -> String {
+    let nominal = [125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0]
+        .into_iter()
+        .min_by(|a: &f64, b: &f64| (a - measured_hz).abs().total_cmp(&(b - measured_hz).abs()))
+        .unwrap_or(1000.0);
+    if nominal < 1000.0 {
+        format!("Seu mouse está em ~{nominal:.0} Hz. Se o software dele permitir, use 1000 Hz: menos atraso e movimento mais liso.")
+    } else if nominal > 1000.0 && fps < 2.0 * nominal / 4.0 {
+        format!("Seu mouse está em ~{nominal:.0} Hz, mas o PC rodou a {fps:.0} fps. Em PC mais simples, 1000 Hz costuma ser melhor: taxas altas gastam CPU e podem travar o jogo.")
+    } else {
+        format!("~{nominal:.0} Hz está bom. Não precisa mudar.")
+    }
+}
+
 /// Conversão de sensibilidade de jogo: `deg_per_count = sens * yaw`.
 pub fn new_game_sens(sens: f64, factor: f64) -> f64 {
     sens * factor
@@ -228,6 +245,14 @@ mod tests {
         assert_eq!(best_round(&r, &p), Some(1));
         let fora = [RoundScore { median_ratio: 1.2, throughput: 6.0 }, RoundScore { median_ratio: 1.1, throughput: 5.0 }];
         assert_eq!(best_round(&fora, &p), Some(1));
+    }
+
+    #[test]
+    fn polling() {
+        assert!(polling_advice(498.0, 300.0).contains("1000 Hz"));
+        assert!(polling_advice(1003.0, 300.0).contains("está bom"));
+        assert!(polling_advice(7900.0, 240.0).contains("PC mais simples"));
+        assert!(polling_advice(4010.0, 2400.0).contains("está bom"));
     }
 
     #[test]
