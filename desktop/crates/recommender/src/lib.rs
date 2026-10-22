@@ -1,5 +1,7 @@
 //! Sugestão de sensibilidade a partir das razões de primeira parada (seção 9 da spec).
 
+pub mod staircase;
+
 use rspec_analysis::stats::{SessionStats, Summary};
 
 #[derive(Clone, Copy, Debug)]
